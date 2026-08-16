@@ -23,8 +23,14 @@ def load_commands(commands_dir: str) -> List[Type[Command]]:
 
                 module = importlib.util.module_from_spec(spec)
 
-                # Load the module
-                spec.loader.exec_module(module)
+                # Load the module. A command whose optional third-party
+                # dependency is missing should disable only itself rather than
+                # taking down the whole CLI.
+                try:
+                    spec.loader.exec_module(module)
+                except ImportError as exc:
+                    print(f"[!] command '{module_name}' unavailable: {exc}", file=sys.stderr)
+                    continue
 
                 for name in dir(module):
                     obj = getattr(module, name)

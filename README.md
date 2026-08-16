@@ -1,4 +1,18 @@
 # Draytek Arsenal: Observability and hardening toolkit for Draytek edge devices.
+
+> **Fork note.** This fork adds support for the **V3000 family** — Vigor 300B, Vigor 2960
+> and Vigor 3900 — which upstream did not handle. These models use neither the MIPS RTOS
+> container nor the ChaCha20 `enc_Image` container: their `.all` files are a 48-byte
+> plain-text checksum header in front of an ordinary ubinized UBI image, and **nothing in
+> them is encrypted**. See [`docs/V3000_FORMAT.md`](docs/V3000_FORMAT.md) for the full
+> format description and how it was confirmed, and the
+> [`extract_v3000`](#extract_v3000) command below.
+>
+> Also included: a dependency-free UBI reader (`ubi.py`), a read-only UBIFS reader
+> (`ubifs.py`), a pure-Python LZO1X decompressor (`lzo1x.py`, so no C toolchain is
+> needed for UBIFS), and a fix so that one command's missing optional dependency no
+> longer disables the entire CLI.
+
 Advanced attackers are increasingly choosing edge devices as targets. However, these devices are controlled by closed-source software known as firmware, often distributed in a proprietary format. This is an added difficulty for defenders and researchers, who must understand how to extract firmware to assess its security.
 
 This is more than just a hypothetical scenario, as we discovered recently when a client was compromised. With Draytek equipment at the edge of their infrastructure, the natural question was: Could this be the attackers' entry point? Over 500k Draytek devices are exposed to the Internet. Yet, no working tool exists to extract their firmware and assist researchers and defenders working with these devices.
@@ -128,6 +142,70 @@ options:
   -h, --help      show this help message and exit
   --fs FS, -f FS  Directory path where to extract and decompress the File System
   --key KEY       Key used to decrypt
+```
+
+### extract_v3000 ###
+
+Parse, verify and extract V3000-family firmware — **Vigor 300B, Vigor 2960 and Vigor
+3900** (`.all`, `.rst`, `.cv3`, `.cx2`, `.ota`).
+
+There is no `--key`: these images are not encrypted. The container is a plain-text
+MD5 + CRC-32 header over a ubinized UBI image holding a single `rootfs` UBIFS volume.
+
+```
+usage: extract_v3000 [-h] [--fs FS] [--ubi UBI] [--volume VOLUME]
+                     [--signature SIGNATURE] [--list] [--json] [--no-verify]
+                     firmware
+
+positional arguments:
+  firmware              Path to the firmware image
+
+options:
+  -h, --help            show this help message and exit
+  --fs FS, -f FS        Directory to extract the root filesystem into
+  --ubi UBI             Write the raw ubinized UBI image to this path
+  --volume VOLUME       Write the raw UBIFS volume image to this path
+  --signature SIGNATURE Write the OTA RSA signature blob to this path (.ota input only)
+  --list, -l            List filesystem contents
+  --json                Emit image metadata as JSON
+  --no-verify           Skip UBIFS node CRC verification
+```
+
+Example:
+
+```bash
+$ python3 -m draytek_arsenal extract_v3000 Vigor300B_v1.5.1.all --fs ./rootfs
+[+] Draytek V3000 container
+    machine type : V3000  (Vigor 300B, firmware (.all, keeps configuration))
+    payload      : 40,370,182 bytes (machine-type line + UBI image)
+    UBI image    : 40,370,176 bytes
+    MD5          : 133ff3fc394242703c221d477cc1cb0f OK
+    CRC32        : d1977fdf OK
+    encryption   : none (payload is a plain ubinized UBI image)
+
+[*] UBI: PEB=0x20000 LEB=0x1f800 PEBs=308 image_seq=0x23f218b5
+[*] version string in EC header padding: '1.5.1_RC2'
+[*] volume id=0 name='rootfs' type=dynamic LEBs=306
+
+[*] parsing UBIFS in volume 'rootfs'...
+[*] UBIFS fmt v4, default compression lzo, uuid f9fa43ec8e214ca6862b8a69faac4c60
+[*] 25,769 nodes (0 bad CRC), 3,143 inodes
+[*] 3,142 directory entries reachable from root
+[+] extracted to ./rootfs
+    dirs=164 files=2553 symlinks=425 special=0 skipped=0
+```
+
+`parse_firmware` also recognises these images and reports them as `type: V3000`.
+
+Repacking is supported programmatically — `v3000.build(ubi_image, machine_type)`
+recomputes both checksums exactly as Draytek's own build script does, so a modified
+image passes the stock updater's validation:
+
+```python
+from draytek_arsenal import v3000
+
+img = v3000.parse(open("Vigor300B_v1.5.1.all", "rb").read())
+open("repacked.all", "wb").write(v3000.build(img.ubi, img.machine_type))
 ```
 
 ### dlm_hash ###

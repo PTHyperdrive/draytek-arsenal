@@ -6,6 +6,7 @@ idna==3.7
 kaitaistruct==0.10
 lief==0.16.1
 lz4==4.3.3
+pycryptodome==3.20.0
 PyYAML==6.0.1
 requests==2.32.0
 urllib3==2.2.2

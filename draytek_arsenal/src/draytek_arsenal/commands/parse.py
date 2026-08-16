@@ -3,6 +3,7 @@ import yaml
 from typing import Any, Dict, List
 from draytek_arsenal.format import parse_firmware
 from draytek_arsenal.draytek_format import Draytek
+from draytek_arsenal.v3000 import V3000Image
 
 class ParseCommand(Command):
 
@@ -51,6 +52,30 @@ class ParseCommand(Command):
                     "checksum": hex(struct.web.checksum)
                 }
             }
+
+        elif isinstance(struct, V3000Image):
+            object = {
+                "type": "V3000",
+                "container": "ota" if struct.is_ota else "all",
+                "machine_type": struct.machine_type,
+                "model": struct.model,
+                "kind": struct.kind,
+                "encrypted": False,
+                "md5": {
+                    "stored": struct.stored_md5,
+                    "computed": struct.actual_md5,
+                    "ok": struct.md5_ok,
+                },
+                "crc32": {
+                    "stored": struct.stored_crc32,
+                    "computed": struct.actual_crc32,
+                    "ok": struct.crc_ok,
+                },
+                "payload_size": len(struct.payload),
+                "ubi_size": len(struct.ubi),
+            }
+            if struct.is_ota:
+                object["ota_signature_size"] = len(struct.ota_signature or b"")
 
         else:
             object = {
