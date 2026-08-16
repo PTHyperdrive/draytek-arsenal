@@ -208,6 +208,37 @@ img = v3000.parse(open("Vigor300B_v1.5.1.all", "rb").read())
 open("repacked.all", "wb").write(v3000.build(img.ubi, img.machine_type))
 ```
 
+### scripts/fw_triage.py ###
+
+Standalone triage for an unknown firmware image, answering the question worth
+asking before you write any parser: **is this actually encrypted?** Getting that
+wrong sends you looking for a key that may not exist.
+
+It reports an entropy profile, a magic-value scan and any plaintext strings in the
+header, then gives a conservative verdict. Stdlib only, and nothing about it is
+Draytek-specific.
+
+```
+usage: fw_triage.py [-h] [--head HEAD] [--strings-window STRINGS_WINDOW]
+                    [--min-string MIN_STRING]
+                    firmware [firmware ...]
+```
+
+```bash
+$ python3 scripts/fw_triage.py Vigor300B_v1.5.1.all
+-- entropy profile (1 MiB windows, 0-8 bits/byte) --
+  ▁▅███████████████▅▆▇███████▇████▇███▇▇▅
+
+-- verdict --
+  NOT ENCRYPTED -- 27390 plaintext magic value(s) found. Structured data cannot survive a cipher.
+```
+
+The distinction it leans on: encrypted data pins flat near 8.0 bits/byte across the
+whole image, while compressed data lands around 7.0–7.9 and *varies* between
+windows. Plaintext ELF headers or filesystem superblocks settle it outright — they
+cannot survive a cipher. Magic values shorter than four bytes collide by chance in
+any large file, so they are reported but excluded from the verdict.
+
 ### dlm_hash ###
 
 Get the hash of a DLM module.
