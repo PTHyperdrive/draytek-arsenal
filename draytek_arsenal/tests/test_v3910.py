@@ -186,3 +186,57 @@ def test_real_image():
     else:
         assert len(img.nonce) == 12
         assert any(m.encrypted for m in img.members)
+
+
+# --------------------------------------------------------------------------
+# Root filesystem
+# --------------------------------------------------------------------------
+
+def _cpio(entries) -> bytes:
+    """Build a cpio 'newc' archive from (name, mode, data) tuples."""
+    out = bytearray()
+    for name, mode, data in list(entries) + [("TRAILER!!!", 0, b"")]:
+        raw = name.encode() + b"\x00"
+        fields = [1, mode, 0, 0, 1, 0, len(data), 0, 0, 0, 0, len(raw), 0]
+        out += b"070701" + b"".join(b"%08X" % f for f in fields) + raw
+        out += b"\x00" * (-len(out) % 4)
+        out += data
+        out += b"\x00" * (-len(out) % 4)
+    return bytes(out)
+
+
+def test_cpio_entries_walks_and_stops_at_trailer():
+    archive = _cpio([("bin", 0o040755, b""),
+                     ("bin/sh", 0o100755, b"#!/bin/sh\n"),
+                     ("bin/link", 0o120777, b"sh")])
+    got = list(v3910.cpio_entries(archive))
+    assert [e.name for e in got] == ["bin", "bin/sh", "bin/link"]
+    assert got[0].is_dir and got[1].is_file and got[2].is_symlink
+    assert got[1].data == b"#!/bin/sh\n"
+
+
+def test_extract_cpio_writes_files(tmp_path):
+    archive = _cpio([("etc", 0o040755, b""),
+                     ("etc/passwd", 0o100644, b"root:x:0:0::/root:/bin/sh\n")])
+    st = v3910.extract_cpio(archive, str(tmp_path / "rootfs"))
+    assert st["files"] == 1 and st["dirs"] == 1
+    assert (tmp_path / "rootfs" / "etc" / "passwd").read_bytes().startswith(b"root:")
+
+
+def test_extract_cpio_refuses_path_traversal(tmp_path):
+    archive = _cpio([("../escaped", 0o100644, b"nope")])
+    st = v3910.extract_cpio(archive, str(tmp_path / "rootfs"))
+    assert st["skipped"] == 1 and st["files"] == 0
+    assert not (tmp_path / "escaped").exists()
+
+
+def test_find_initramfs_ignores_the_kernels_own_cpio_strings():
+    """A bare 070701 in kernel rodata must not be mistaken for an archive."""
+    data = bytearray(_plain_image())
+    data[0x18000:0x18020] = b"070701\x00\x00no cpio magic\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    assert v3910.find_initramfs(bytes(data)) is None
+
+
+def test_initramfs_bytes_raises_when_absent():
+    with pytest.raises(ValueError):
+        v3910.initramfs_bytes(_plain_image())

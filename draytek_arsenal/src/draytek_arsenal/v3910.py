@@ -42,6 +42,16 @@ ARM64_MAGIC_OFFSET = 0x38
 FDT_MAGIC = bytes.fromhex("d00dfeed")
 CPIO_MAGIC = b"070701"
 
+# The root filesystem is a cpio archive in an LZ4 *legacy* frame: the magic,
+# then [u32le block_length][block] repeated, each block decompressing to at
+# most 8 MiB. Note this is not the modern LZ4 frame format.
+LZ4_LEGACY_MAGIC = bytes.fromhex("02214c18")
+LZ4_LEGACY_BLOCK_MAX = 8 << 20
+
+CPIO_HEADER_LEN = 110           # "070701" + 13 fields of 8 hex digits
+CPIO_TRAILER = "TRAILER!!!"
+S_IFMT, S_IFDIR, S_IFLNK, S_IFREG = 0o170000, 0o040000, 0o120000, 0o100000
+
 PLAIN, ENCRYPTED = "plain", "encrypted"
 
 
@@ -83,7 +93,7 @@ class V3910Image:
     kernel: Kernel | None = None
     dtbs: list[Dtb] = field(default_factory=list)
     members: list[Member] = field(default_factory=list)
-    cpio_entries: int = 0
+    initramfs_offset: int | None = None
     nonce: bytes = b""
 
     @property
@@ -192,12 +202,141 @@ def parse(data: bytes) -> V3910Image:
     if kernel is not None:
         img = V3910Image(data, PLAIN, version.decode("latin-1", "replace"), kernel)
         img.dtbs = _find_dtbs(data)
-        img.cpio_entries = data.count(CPIO_MAGIC)
+        img.initramfs_offset = find_initramfs(data)
         return img
 
     img = V3910Image(data, ENCRYPTED, version.decode("latin-1", "replace"))
     img.members, img.nonce = members, nonce
     return img
+
+
+@dataclass
+class CpioEntry:
+    name: str
+    mode: int
+    data: bytes
+
+    @property
+    def is_dir(self) -> bool:
+        return self.mode & S_IFMT == S_IFDIR
+
+    @property
+    def is_symlink(self) -> bool:
+        return self.mode & S_IFMT == S_IFLNK
+
+    @property
+    def is_file(self) -> bool:
+        return self.mode & S_IFMT == S_IFREG
+
+
+def find_initramfs(data: bytes) -> int | None:
+    """Offset of the LZ4 legacy frame holding the root filesystem.
+
+    A bare search for the cpio magic finds the kernel's own error strings
+    ("no cpio magic") and literals inside compressed data, so look for the
+    LZ4 frame instead and confirm by what it decompresses to.
+    """
+    for m in re.finditer(re.escape(LZ4_LEGACY_MAGIC), data):
+        try:
+            head = _lz4_legacy(data, m.start(), stop_after=1)
+        except Exception:
+            continue
+        if head[:6] == CPIO_MAGIC:
+            return m.start()
+    return None
+
+
+def _lz4_legacy(data: bytes, offset: int, stop_after: int | None = None) -> bytes:
+    """Decompress an LZ4 legacy frame at `offset`."""
+    from draytek_arsenal.lz4_block import decompress as lz4_block
+
+    pos, chunks, blocks = offset + 4, [], 0
+    while pos + 4 <= len(data):
+        size = struct.unpack_from("<I", data, pos)[0]
+        if size == 0 or size > LZ4_LEGACY_BLOCK_MAX or pos + 4 + size > len(data):
+            break
+        chunks.append(lz4_block(data[pos + 4:pos + 4 + size]))
+        pos += 4 + size
+        blocks += 1
+        if stop_after and blocks >= stop_after:
+            break
+    return b"".join(chunks)
+
+
+def initramfs_bytes(data: bytes, offset: int | None = None) -> bytes:
+    """The decompressed cpio archive."""
+    if offset is None:
+        offset = find_initramfs(data)
+    if offset is None:
+        raise ValueError("no LZ4-compressed cpio archive found")
+    return _lz4_legacy(data, offset)
+
+
+def cpio_entries(buf: bytes):
+    """Walk a cpio 'newc' archive, yielding CpioEntry."""
+    off = 0
+    while off + CPIO_HEADER_LEN <= len(buf):
+        if buf[off:off + 6] != CPIO_MAGIC:
+            break
+        try:
+            fields = [int(buf[off + 6 + i * 8: off + 14 + i * 8], 16) for i in range(13)]
+        except ValueError:
+            break
+        mode, size, namesize = fields[1], fields[6], fields[11]
+        name = buf[off + CPIO_HEADER_LEN: off + CPIO_HEADER_LEN + namesize - 1]
+        body = (off + CPIO_HEADER_LEN + namesize + 3) & ~3
+        off = (body + size + 3) & ~3
+        decoded = name.decode("latin-1")
+        if decoded == CPIO_TRAILER:
+            break
+        yield CpioEntry(decoded, mode, buf[body:body + size])
+
+
+def extract_cpio(buf: bytes, out_dir: str) -> dict:
+    """Unpack a cpio archive to disk.
+
+    Symlinks are recreated where the platform allows it; where it does not
+    (Windows without developer mode) they are recorded in `symlinks.txt` so
+    the tree stays clean for grepping rather than filling with stub files.
+    """
+    import os
+
+    root = os.path.abspath(out_dir)
+    os.makedirs(root, exist_ok=True)
+    stats = {"files": 0, "dirs": 0, "symlinks": 0, "unlinked": 0, "bytes": 0,
+             "skipped": 0}
+    unlinked = []
+
+    for entry in cpio_entries(buf):
+        dst = os.path.abspath(os.path.join(root, entry.name))
+        if os.path.commonpath((root, dst)) != root:
+            stats["skipped"] += 1          # path traversal
+            continue
+
+        if entry.is_dir:
+            os.makedirs(dst, exist_ok=True)
+            stats["dirs"] += 1
+        elif entry.is_symlink:
+            target = entry.data.split(b"\0")[0].decode("latin-1")
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            try:
+                if not os.path.lexists(dst):
+                    os.symlink(target, dst)
+                stats["symlinks"] += 1
+            except OSError:
+                unlinked.append("%s -> %s" % (entry.name, target))
+                stats["unlinked"] += 1
+        elif entry.is_file:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, "wb") as fh:
+                fh.write(entry.data)
+            stats["files"] += 1
+            stats["bytes"] += len(entry.data)
+
+    if unlinked:
+        with open(os.path.join(root, "symlinks.txt"), "w") as fh:
+            fh.write("\n".join(unlinked) + "\n")
+    return stats
 
 
 def qemu_argv(kernel_path: str, memory: int = 2048, cpu: str = "cortex-a57",

@@ -229,7 +229,8 @@ Two generations, under two container headers (`0x06020106` and `6216`):
 
 ```
 usage: extract_v3910 [-h] [--kernel KERNEL] [--dtb-dir DTB_DIR] [--list]
-                     [--json] [--qemu] [--run] [--memory MEMORY] [--cpu CPU]
+                     [--rootfs ROOTFS] [--json] [--qemu] [--run]
+                     [--memory MEMORY] [--cpu CPU]
                      [--cmdline CMDLINE]
                      firmware
 ```
@@ -244,9 +245,35 @@ $ python -m draytek_arsenal extract_v3910 v3910_3971.all --list
     kernel  : ARM64 Image @ 0x00504030, text_offset 0x80000, little-endian
               image_size 44011520 bytes (runtime footprint, includes BSS)
     dtbs    : 47 board device trees
-    rootfs  : 70 cpio entries -- initramfs is embedded in the kernel,
-              so no separate -initrd is needed to reach userspace
+    rootfs  : LZ4 cpio initramfs @ 0x00EE3C48, embedded in the kernel
+              (so no separate -initrd is needed to reach userspace)
 ```
+
+Unpack the root filesystem for static analysis:
+
+```console
+$ python -m draytek_arsenal extract_v3910 v3910_3971.all --rootfs rootfs/
+[*] Initramfs: LZ4 legacy frame @ 0x00EE3C48
+[*] Decompressed to 79824384 bytes of cpio
+[+] Root filesystem unpacked to rootfs/
+    430 files (79692656 bytes), 88 dirs, 401 symlinks
+```
+
+The archive is a cpio in an **LZ4 legacy frame** — magic `02214c18`, then
+`[u32le block_length][block]` — not the modern LZ4 frame format. Searching for
+the cpio magic directly does not find it: the hits are the kernel's own
+`"no cpio magic"` error string and literals inside compressed data. Locate the
+LZ4 frame and confirm by what the first block decompresses to.
+
+Decompression uses the bundled pure-Python `lz4_block`, so this needs no
+compiled `lz4`. Path traversal is refused; symlinks are recreated where the
+platform allows and otherwise recorded in `symlinks.txt`.
+
+What comes out is the full DrayOS userland, including
+`firmware/vqemu/sohod64.bin` (the DrayOS binary itself), `sbin/chacha20` (the
+firmware decryptor — it contains `expand 32-byte k`), DrayTek's own QEMU launch
+scripts under `firmware/`, and a copy of `usr/bin/qemu-system-aarch64`: the
+device emulates DrayOS on itself.
 
 Extract the kernel and boot it:
 

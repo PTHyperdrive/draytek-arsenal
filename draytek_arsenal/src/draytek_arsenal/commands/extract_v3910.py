@@ -32,6 +32,9 @@ class ExtractV3910Command(Command):
             {"flags": ["--kernel", "-k"], "kwargs": {
                 "type": str, "required": False,
                 "help": "File to write the ARM64 kernel Image to"}},
+            {"flags": ["--rootfs", "-r"], "kwargs": {
+                "type": str, "required": False,
+                "help": "Directory to unpack the root filesystem into"}},
             {"flags": ["--dtb-dir", "-d"], "kwargs": {
                 "type": str, "required": False,
                 "help": "Directory to write the board device trees to"}},
@@ -91,6 +94,26 @@ class ExtractV3910Command(Command):
             print("\n[+] Kernel extracted to %s (%d bytes)"
                   % (kernel_path, len(img.kernel_bytes())))
 
+        if args.rootfs:
+            offset = v3910.find_initramfs(data)
+            if offset is None:
+                print()
+                print("[x] No LZ4-compressed cpio archive found")
+            else:
+                print()
+                print("[*] Initramfs: LZ4 legacy frame @ 0x%08X" % offset)
+                archive = v3910.initramfs_bytes(data, offset)
+                print("[*] Decompressed to %d bytes of cpio" % len(archive))
+                st = v3910.extract_cpio(archive, args.rootfs)
+                print("[+] Root filesystem unpacked to %s" % args.rootfs)
+                print("    %d files (%d bytes), %d dirs, %d symlinks"
+                      % (st["files"], st["bytes"], st["dirs"], st["symlinks"]))
+                if st["unlinked"]:
+                    print("    %d symlinks could not be created; listed in symlinks.txt"
+                          % st["unlinked"])
+                if st["skipped"]:
+                    print("    %d entries skipped (path traversal)" % st["skipped"])
+
         if args.dtb_dir:
             os.makedirs(args.dtb_dir, exist_ok=True)
             for i, dtb in enumerate(img.dtbs):
@@ -132,7 +155,7 @@ def _describe(img, path) -> dict:
                          "image_size": img.kernel.image_size,
                          "endian": "little" if img.kernel.little_endian else "big"}
         out["device_trees"] = len(img.dtbs)
-        out["cpio_entries"] = img.cpio_entries
+        out["initramfs_offset"] = img.initramfs_offset
     if img.members:
         out["nonce"] = img.nonce.decode("latin-1", "replace")
         out["members"] = [{"name": m.name, "offset": m.offset, "size": m.size,
@@ -153,9 +176,12 @@ def _report(img, path) -> None:
         print("              image_size %d bytes (runtime footprint, includes BSS)"
               % k.image_size)
         print("    dtbs    : %d board device trees" % len(img.dtbs))
-        print("    rootfs  : %d cpio entries -- initramfs is embedded in the kernel,"
-              % img.cpio_entries)
-        print("              so no separate -initrd is needed to reach userspace")
+        if img.initramfs_offset is not None:
+            print("    rootfs  : LZ4 cpio initramfs @ 0x%08X, embedded in the kernel"
+                  % img.initramfs_offset)
+            print("              (so no separate -initrd is needed to reach userspace)")
+        else:
+            print("    rootfs  : no LZ4 cpio archive found")
 
     if img.members:
         if img.nonce:
