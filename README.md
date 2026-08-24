@@ -208,6 +208,78 @@ img = v3000.parse(open("Vigor300B_v1.5.1.all", "rb").read())
 open("repacked.all", "wb").write(v3000.build(img.ubi, img.machine_type))
 ```
 
+### extract_v3910 ###
+
+Unpack and **emulate** the ARM64 Linux family — **Vigor 3910, 2962 and 3912**
+(`.all`, `.sfw`). These are neither the MIPS RTOS container nor the V3000 UBI
+container: they are a DrayTek header over a Marvell/Cavium OCTEON TX boot chain
+— ATF, U-Boot, board device trees, an ARM64 Linux `Image`, and a root
+filesystem. DrayOS runs as a *process* on that Linux rather than being the
+kernel.
+
+Two generations, under two container headers (`0x06020106` and `6216`):
+
+- **3.9.x and earlier — in the clear, and directly bootable.** The kernel
+  carries its root filesystem as an embedded initramfs, so no `-initrd` is
+  needed to reach userspace.
+- **4.x — ChaCha20 encrypted.** Members (`vmlinuz.enc`, `rootfs.uboot.img.enc`,
+  `flash-image.bin.enc`, a `.dtb.enc`) are located and listed, and the 12-byte
+  nonce is read from the clear, but the 256-bit key lives in the bootloader and
+  is not in the image. Nothing to boot.
+
+```
+usage: extract_v3910 [-h] [--kernel KERNEL] [--dtb-dir DTB_DIR] [--list]
+                     [--json] [--qemu] [--run] [--memory MEMORY] [--cpu CPU]
+                     [--cmdline CMDLINE]
+                     firmware
+```
+
+Inspect an image:
+
+```console
+$ python -m draytek_arsenal extract_v3910 v3910_3971.all --list
+[+] v3910_3971.all
+    version : 3.9.7.1_RC1
+    type    : plain ARM64 Linux
+    kernel  : ARM64 Image @ 0x00504030, text_offset 0x80000, little-endian
+              image_size 44011520 bytes (runtime footprint, includes BSS)
+    dtbs    : 47 board device trees
+    rootfs  : 70 cpio entries -- initramfs is embedded in the kernel,
+              so no separate -initrd is needed to reach userspace
+```
+
+Extract the kernel and boot it:
+
+```console
+$ python -m draytek_arsenal extract_v3910 v3910_3971.all --kernel Image --run
+...
+[    0.000000] Linux version 4.9.0-OCTEONTX_SDK_6_2_0_p3_build_38 (jenkins@cavium-autobuild)
+[    0.737651] Freeing unused kernel memory: 32384K
+Vigor3910 login:
+Boot DrayOS with MEMSIZE -m 512
+```
+
+`--qemu` prints the command instead of running it.
+
+Three things worth knowing:
+
+- The kernel is carved from its header to the end of the image. The ARM64
+  header's `image_size` is the *runtime* footprint including BSS — on a real
+  3910 it reads 44 MB against a 43 MB file — so it cannot be used as a length.
+  Trailing bytes are harmless; truncation is not.
+- **Do not pass a board device tree to `-M virt`.** `--dtb-dir` writes them out
+  for inspection, but they describe OCTEON TX hardware QEMU does not emulate.
+  `virt` builds its own tree, and the kernel is multi-platform, so it happily
+  uses virt's PL011 and PSCI instead. Supplying the real tree makes the boot
+  fail earlier, not work better.
+- `earlycon` in the default command line is load-bearing: without it there is no
+  output until the console driver probes, which on foreign hardware may be never.
+
+What you get is a real DrayTek kernel on synthetic hardware — genuine build,
+genuine userspace, but the platform underneath is QEMU's. Enough to reach a
+login prompt and run DrayOS as a process; not a faithful 3910. Hardware drivers
+find no devices, and DrayOS coredumps when it reaches for `/dev/mtd0`.
+
 ### scripts/fw_triage.py ###
 
 Standalone triage for an unknown firmware image, answering the question worth
