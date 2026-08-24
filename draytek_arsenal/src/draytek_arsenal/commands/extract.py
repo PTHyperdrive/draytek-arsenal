@@ -86,6 +86,26 @@ class ExtractCommand(Command):
 
   
     @staticmethod
+    def _prepare_output(file_path: str) -> bool:
+        """Make sure a file output can be written, creating its directory.
+
+        A bare filename has an empty dirname, and ``isdir("")`` is False, so
+        naively testing the dirname rejects the most natural way to invoke the
+        command. Treat that as the working directory.
+        """
+        parent = path.dirname(file_path) or os.curdir
+        if path.isdir(parent):
+            return True
+
+        try:
+            os.makedirs(parent)
+            return True
+        except OSError as exc:
+            print(f"[x] Cannot write {file_path}: {exc}")
+            return False
+
+
+    @staticmethod
     def _extract_pfs(data: bytes, out_dir: str, extractor: PFSExtractor) -> None:
         """Run a PFS archive held in memory through PFSExtractor.
 
@@ -124,12 +144,12 @@ class ExtractCommand(Command):
                 and args.header is None and args.bootloader is None):
             print(f"[x] Nothing to extract. Please set some extraction flag.")
 
-        if args.header is not None:
+        if args.header is not None and ExtractCommand._prepare_output(args.header):
             with open(args.header, "wb") as output_file:
                 output_file.write(raw[:HEADER_SIZE])
             print(f"[+] Header extracted in {args.header}")
 
-        if args.bootloader is not None:
+        if args.bootloader is not None and ExtractCommand._prepare_output(args.bootloader):
             # bootloader.data keeps the A55AA55A end marker as its last word;
             # everything before it is the raw MIPS the RTOS is appended to.
             boot = b"".join(pack(">I", word) for word in fw_struct.bin.bootloader.data[:-1])
@@ -140,13 +160,10 @@ class ExtractCommand(Command):
         if args.rtos is not None:
             print("[+] Extracting RTOS from firmware")
 
-            if not path.isdir(path.dirname(args.rtos)):
-                print("[x] Bad RTOS output file")
-
-            elif fw_struct.bin.rtos.rtos_size != len(fw_struct.bin.rtos.data):
+            if fw_struct.bin.rtos.rtos_size != len(fw_struct.bin.rtos.data):
                 print(f"[x] Data length ({len(fw_struct.bin.rtos.data)}) doesn't match with the header length ({fw_struct.bin.rtos.rtos_size})")
 
-            else:
+            elif ExtractCommand._prepare_output(args.rtos):
                 unstructured_bootloader = b"".join([pack(">I", integer) for integer in fw_struct.bin.bootloader.data[:-1]])
 
                 lz4 = Lz4()

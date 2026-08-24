@@ -111,6 +111,37 @@ def test_extract_pfs_creates_missing_output_dir(tmp_path):
     assert (out / "a.txt").read_bytes() == b"x"
 
 
+# --------------------------------------------------------------------------
+# File output paths
+# --------------------------------------------------------------------------
+
+@pytest.mark.skipif(ExtractCommand is None, reason="extract command dependencies missing")
+def test_bare_filename_is_accepted(tmp_path, monkeypatch):
+    """`--rtos rtos.bin` has an empty dirname; isdir("") is False."""
+    monkeypatch.chdir(tmp_path)
+    assert ExtractCommand._prepare_output("rtos.bin") is True
+
+
+@pytest.mark.skipif(ExtractCommand is None, reason="extract command dependencies missing")
+def test_existing_directory_is_accepted(tmp_path):
+    assert ExtractCommand._prepare_output(str(tmp_path / "rtos.bin")) is True
+
+
+@pytest.mark.skipif(ExtractCommand is None, reason="extract command dependencies missing")
+def test_missing_parents_are_created(tmp_path):
+    target = tmp_path / "a" / "b" / "rtos.bin"
+    assert ExtractCommand._prepare_output(str(target)) is True
+    assert target.parent.is_dir()
+
+
+@pytest.mark.skipif(ExtractCommand is None, reason="extract command dependencies missing")
+def test_unusable_parent_is_rejected(tmp_path):
+    """A parent path that is a regular file cannot be made into a directory."""
+    blocker = tmp_path / "notadir"
+    blocker.write_bytes(b"x")
+    assert ExtractCommand._prepare_output(str(blocker / "rtos.bin")) is False
+
+
 @pytest.mark.skipif(ExtractCommand is None, reason="extract command dependencies missing")
 def test_extract_pfs_leaves_no_temp_files_behind(tmp_path):
     """The staging directory is removed even though a file was created in it."""
