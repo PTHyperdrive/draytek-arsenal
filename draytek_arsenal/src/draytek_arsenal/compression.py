@@ -1,10 +1,24 @@
 import struct
-import lz4.block
+
+try:
+    import lz4.block
+except ImportError:  # no compiled wheel for this interpreter
+    lz4 = None
+
+from draytek_arsenal import lz4_block
 
 class Lz4():
     """Draytek's modified Lz4 implementation"""
     magic = b"\xaa\x1d\x7f\x50"
     max_decompressed_block_size = 0x10000
+
+    def _decompress_block(self, block: bytes) -> bytes:
+        """Decode one LZ4 block, preferring the C extension when present."""
+        if lz4 is not None:
+            return lz4.block.decompress(
+                block, uncompressed_size=self.max_decompressed_block_size
+            )
+        return lz4_block.decompress(block)
 
     def decompress(self, input, last_block: int | None = None) -> bytes:
         if self.magic != input[:4]:
@@ -25,7 +39,7 @@ class Lz4():
             block_data_offset = block_offset + 4
             block = input[block_data_offset:block_data_offset+block_data_size]
             try:
-                output += lz4.block.decompress(block, uncompressed_size=self.max_decompressed_block_size)
+                output += self._decompress_block(block)
             except Exception as e:
                 print(e)
                 exit(1)
@@ -34,6 +48,11 @@ class Lz4():
         return output
     
     def compress(self, input):
+        if lz4 is None:
+            raise RuntimeError(
+                "repacking needs the 'lz4' package (pip install lz4); the "
+                "bundled pure-Python codec is decompress-only"
+            )
         output = self.magic
 
         i = 0
